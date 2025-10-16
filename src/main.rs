@@ -1,16 +1,8 @@
 use chrono::{DateTime, Utc};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rand::Rng;
 use rusqlite::{Connection, OpenFlags, Result as SqlResult};
-use std::fs::File;
-use std::io::BufReader;
 use std::path::PathBuf;
-use symphonia::core::audio::{SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use std::process::Command;
 
 struct VoiceMemo {
     title: String,
@@ -53,16 +45,22 @@ fn get_all_voice_memos() -> SqlResult<Vec<VoiceMemo>> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
     let mut stmt = conn.prepare(
-        "SELECT ZTITLE, ZDATE, ZDURATION, ZPATH FROM ZCLOUDRECORDING WHERE ZDURATION > 30.0",
+        "SELECT ZENCRYPTEDTITLE, ZCUSTOMLABEL, ZDATE, ZDURATION, ZPATH FROM ZCLOUDRECORDING WHERE ZDURATION > 30.0"
     )?;
 
     let memos = stmt
         .query_map([], |row| {
+            // Try ZENCRYPTEDTITLE first, fall back to ZCUSTOMLABEL, then "Untitled"
+            let title = row
+                .get::<_, String>(0)
+                .or_else(|_| row.get::<_, String>(1))
+                .unwrap_or_else(|_| "Untitled".to_string());
+
             Ok(VoiceMemo {
-                title: row.get(0).unwrap_or_else(|_| "Untitled".to_string()),
-                date: row.get(1)?,
-                duration: row.get(2)?,
-                path: row.get(3)?,
+                title,
+                date: row.get(2)?,
+                duration: row.get(3)?,
+                path: row.get(4)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -71,158 +69,55 @@ fn get_all_voice_memos() -> SqlResult<Vec<VoiceMemo>> {
     Ok(memos)
 }
 
-fn play_audio_segment(
-    file_path: &PathBuf,
+fn extract_and_play_clip(
+    source_path: &PathBuf,
     start_sec: f64,
     duration_sec: f64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Open the media source in READ-ONLY mode (File::open is read-only by default)
-    let file = File::open(file_path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // Create a temporary file for the clip
+    let temp_dir = std::env::temp_dir();
+    let clip_path = temp_dir.join(format!("voice_memo_clip_{}.m4a", std::process::id()));
 
-    // Create a hint to help the format registry guess the format
-    let mut hint = Hint::new();
-    hint.with_extension("m4a");
+    println!("Extracting 30-second clip with ffmpeg...");
 
-    // Probe the media source
-    let probed = symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    )?;
+    // Use ffmpeg to extract the clip
+    let output = Command::new("ffmpeg")
+        .arg("-ss")
+        .arg(format!("{}", start_sec))
+        .arg("-i")
+        .arg(source_path)
+        .arg("-t")
+        .arg(format!("{}", duration_sec))
+        .arg("-c")
+        .arg("copy")
+        .arg("-y") // Overwrite without asking
+        .arg(&clip_path)
+        .output()?;
 
-    let mut format = probed.format;
-
-    // Find the first audio track
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or("No audio track found")?;
-
-    let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.ok_or("No sample rate")?;
-    let channels = track.codec_params.channels.ok_or("No channels")?;
-
-    // Create a decoder
-    let mut decoder =
-        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
-
-    // Calculate frame positions
-    let start_frame = (start_sec * sample_rate as f64) as u64;
-    let end_frame = start_frame + (duration_sec * sample_rate as f64) as u64;
-
-    // Set up audio output
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("No output device available")?;
-
-    let config = cpal::StreamConfig {
-        channels: channels.count() as u16,
-        sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
-    };
-
-    // Shared buffer for audio samples
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(32);
-
-    // Create output stream
-    let stream = device.build_output_stream(
-        &config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            if let Ok(samples) = rx.try_recv() {
-                let len = data.len().min(samples.len());
-                data[..len].copy_from_slice(&samples[..len]);
-                if len < data.len() {
-                    data[len..].fill(0.0);
-                }
-            } else {
-                data.fill(0.0);
-            }
-        },
-        |err| eprintln!("Audio stream error: {}", err),
-        None,
-    )?;
-
-    stream.play()?;
-
-    // Decode and play
-    let mut current_frame = 0u64;
-    let mut sample_buf = None;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        match decoder.decode(&packet) {
-            Ok(decoded) => {
-                if sample_buf.is_none() {
-                    let spec = SignalSpec::new(sample_rate, channels);
-                    sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
-                }
-
-                if let Some(ref mut buf) = sample_buf {
-                    buf.copy_interleaved_ref(decoded);
-                    let samples = buf.samples();
-
-                    let packet_frames = samples.len() as u64 / channels.count() as u64;
-                    let packet_end = current_frame + packet_frames;
-
-                    // Check if this packet contains audio we want to play
-                    if packet_end >= start_frame && current_frame < end_frame {
-                        let start_sample = if current_frame < start_frame {
-                            ((start_frame - current_frame) * channels.count() as u64) as usize
-                        } else {
-                            0
-                        };
-
-                        let end_sample = if packet_end > end_frame {
-                            ((end_frame - current_frame) * channels.count() as u64) as usize
-                        } else {
-                            samples.len()
-                        };
-
-                        if start_sample < end_sample {
-                            let segment = samples[start_sample..end_sample].to_vec();
-                            if tx.send(segment).is_err() {
-                                break;
-                            }
-
-                            // Small delay to prevent buffer underrun
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                    }
-
-                    current_frame = packet_end;
-
-                    if current_frame >= end_frame {
-                        break;
-                    }
-                }
-            }
-            Err(_) => continue,
-        }
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg failed: {}", error).into());
     }
 
-    // Wait for playback to complete
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    println!("Clip saved to: {:?}\n", clip_path);
+    println!("Opening with VLC...\n");
 
-    Ok(())
+    // Open with VLC
+    Command::new("open")
+        .arg("-g")
+        .arg("-a")
+        .arg("VLC")
+        .arg(&clip_path)
+        .spawn()?;
+
+    Ok(clip_path)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // NOTE: This script operates in READ-ONLY mode
+    // NOTE: This script operates in READ-ONLY mode on Voice Memos
     // - Database is opened with SQLITE_OPEN_READ_ONLY flag
-    // - Audio files are opened with File::open (read-only by default)
-    // - No files are created, modified, or deleted
+    // - Audio files are only read, never modified
+    // - A temporary clip file is created in /tmp for playback
 
     println!("Loading Voice Memos library...\n");
 
@@ -277,10 +172,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("Playing clip...\n");
-    play_audio_segment(&full_path, start_time, 30.0)?;
+    let clip_path = extract_and_play_clip(&full_path, start_time, 30.0)?;
 
-    println!("Playback complete!");
+    println!("VLC should now be playing the clip.");
+    println!("Temporary file will remain at: {:?}", clip_path);
+    println!("You can delete it manually or it will be cleaned up on reboot.");
 
     Ok(())
 }
