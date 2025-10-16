@@ -48,19 +48,25 @@ fn get_all_voice_memos() -> SqlResult<Vec<VoiceMemo>> {
         "SELECT ZENCRYPTEDTITLE, ZCUSTOMLABEL, ZDATE, ZDURATION, ZPATH FROM ZCLOUDRECORDING WHERE ZDURATION > 30.0"
     )?;
 
+    const ZENCRYPTEDTITLE_COL_NUMBER: usize = 0;
+    const ZCUSTOMLABEL_COL_NUMBER: usize = 1;
+    const ZDATE_COL_NUM: usize = 2;
+    const ZDURATION_COL_NUM: usize = 3;
+    const ZPATH_COL_NUM: usize = 4;
+
     let memos = stmt
         .query_map([], |row| {
             // Try ZENCRYPTEDTITLE first, fall back to ZCUSTOMLABEL, then "Untitled"
             let title = row
-                .get::<_, String>(0)
-                .or_else(|_| row.get::<_, String>(1))
+                .get(ZENCRYPTEDTITLE_COL_NUMBER)
+                .or_else(|_| row.get(ZCUSTOMLABEL_COL_NUMBER))
                 .unwrap_or_else(|_| "Untitled".to_string());
 
             Ok(VoiceMemo {
                 title,
-                date: row.get(2)?,
-                duration: row.get(3)?,
-                path: row.get(4)?,
+                date: row.get(ZDATE_COL_NUM)?,
+                duration: row.get(ZDURATION_COL_NUM)?,
+                path: row.get(ZPATH_COL_NUM)?,
             })
         })?
         .filter_map(|r| r.ok())
