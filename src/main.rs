@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -19,22 +19,46 @@ struct VoiceMemo {
     path: String,
 }
 
-fn get_voice_memos_db_path() -> PathBuf {
+fn get_voice_memos_paths() -> (PathBuf, PathBuf) {
     let home = std::env::var("HOME").expect("HOME environment variable not set");
-    PathBuf::from(home)
-        .join("Library")
-        .join("Application Support")
-        .join("com.apple.voicememos")
-        .join("CloudRecordings.db")
-}
+    let home_path = PathBuf::from(home);
 
-fn get_voice_memos_dir() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME environment variable not set");
-    PathBuf::from(home)
+    // macOS Sonoma (14) and later: Group Containers location
+    let new_db = home_path
+        .join("Library")
+        .join("Group Containers")
+        .join("group.com.apple.VoiceMemos.shared")
+        .join("Recordings")
+        .join("CloudRecordings.db");
+
+    let new_recordings = home_path
+        .join("Library")
+        .join("Group Containers")
+        .join("group.com.apple.VoiceMemos.shared")
+        .join("Recordings");
+
+    // Older macOS (pre-Sonoma): Application Support location
+    let old_db = home_path
         .join("Library")
         .join("Application Support")
         .join("com.apple.voicememos")
-        .join("Recordings")
+        .join("CloudRecordings.db");
+
+    let old_recordings = home_path
+        .join("Library")
+        .join("Application Support")
+        .join("com.apple.voicememos")
+        .join("Recordings");
+
+    // Check which location exists
+    if new_db.exists() {
+        (new_db, new_recordings)
+    } else if old_db.exists() {
+        (old_db, old_recordings)
+    } else {
+        // Default to new location for better error messages
+        (new_db, new_recordings)
+    }
 }
 
 fn core_data_to_unix_timestamp(core_data_timestamp: f64) -> i64 {
@@ -46,7 +70,7 @@ fn core_data_to_unix_timestamp(core_data_timestamp: f64) -> i64 {
 }
 
 fn get_all_voice_memos() -> SqlResult<Vec<VoiceMemo>> {
-    let db_path = get_voice_memos_db_path();
+    let (db_path, _) = get_voice_memos_paths();
 
     // Open database in READ-ONLY mode to prevent any modifications
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -224,6 +248,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // - No files are created, modified, or deleted
 
     println!("Loading Voice Memos library...\n");
+
+    // Check which location we're using
+    let (db_path, recordings_path) = get_voice_memos_paths();
+    println!("Database: {:?}", db_path);
+    println!("Recordings: {:?}\n", recordings_path);
 
     let memos = get_all_voice_memos()?;
 
