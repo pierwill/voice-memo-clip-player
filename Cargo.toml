@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite = "0.31"
-symphonia = { version = "0.5", features = ["aac", "isomp4"] }
-cpal = "0.15"
+rusqlite = { version = "0.31", features = ["bundled"] }
 rand = "0.8"
 chrono = "0.4"
