@@ -120,6 +120,7 @@ fn extract_and_play_clip(
 
     // Open with VLC
     Command::new("open")
+        .arg("-g")
         .arg("-a")
         .arg("VLC")
         .arg(&clip_path)
