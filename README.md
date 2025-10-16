@@ -46,31 +46,6 @@ cargo run --release
 4. Extracts the clip with metadata
 5. Opens the audio clip in VLC
 
-### Example Output
-
-```
-Loading Voice Memos library...
-
-Found 47 voice memos longer than 30 seconds.
-
-═══════════════════════════════════════════════════
-  Random Voice Memo Clip
-═══════════════════════════════════════════════════
-Title:    Meeting Notes
-Date:     October 12, 2025 at 02:30:45 PM UTC
-Duration: 245.3 seconds
-Clip:     87.2s - 117.2s (30 seconds)
-═══════════════════════════════════════════════════
-
-Extracting 30-second clip with ffmpeg...
-Clip saved to: "/var/folders/.../voice_memo_clip_12345.m4a"
-
-Opening with VLC...
-
-VLC should now be playing the clip.
-Temporary file will remain at: "/var/folders/.../voice_memo_clip_12345.m4a"
-```
-
 ## How It Works
 
 ### 1. Database Access
