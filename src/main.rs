@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // NOTE: This script operates in READ-ONLY mode on Voice Memos
     // - Database is opened with SQLITE_OPEN_READ_ONLY flag
     // - Audio files are only read, never modified
-    // - A temporary clip file is created in /tmp for playback
+    // - A temporary clip file is created for playback
 
     println!("Loading Voice Memos library...\n");
 
